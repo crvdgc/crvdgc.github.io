@@ -1,0 +1,455 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="author" content="ubikium" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Cache-Control" content="max-age=86400, must-revalidate" />
+        <title>Ubikium</title>
+        <link rel="stylesheet" type="text/css" title="hakyll_theme" href="../css/theprofessional.css" />
+        <link rel="stylesheet" type="text/css" title-"syntax_highlighting" href="../css/monokai.css">
+        <script src="../assets/highlight.pack.js"></script>
+        <script>hljs.initHighlightingOnLoad();</script>
+    </head>
+    <body>
+      <div class="highbar">&nbsp;</div>
+        <div id="header">
+          <div class="box">
+            <div id="logo" class="name">
+				<img src="../images/logo-crvdgc.png" class="icon" style="height: 90px;" />
+            </div>
+            <div id="navigation" class="pageslinks">
+              <nav class="menuNav">
+                <div class="menuItems">
+                <a href="../" class="portfolio/2021-10-10-pattern-matching-as-prisms.md">Home</a>
+                <a href="../about.html" class="portfolio/2021-10-10-pattern-matching-as-prisms.md">About</a>
+                <a href="../archive.html" class="portfolio/2021-10-10-pattern-matching-as-prisms.md">Portfolio</a>
+                </div>
+              </nav>
+            </div>
+        </div>
+        </div>
+        <div class="container-gallery">
+        <div id="content" class="inside">
+            <div class="info">
+    <h1>Pattern-matching-based AST Evaluation as Prisms</h1>
+    Posted on October 10, 2021
+    
+        by ubikium
+    
+</div>
+<hr>
+
+<h2 id="introduction">Introduction</h2>
+<p>When performing evaluation on an Abstract Syntax Tree (AST) for an Embedded Domain-Specific Language (EDSL), it would be nice to have a “pattern matching” feature to define semantic rules. For example, “for an expression of the form <code>Add M N</code>, if <code>M</code> and <code>N</code> are integers, it evaluates to <code>M+N</code>”.</p>
+<p>This blog post will introduce a way to use prism-like functions to express such complex pattern-matching-based evaluation rules. For most of the parts, the reader need not to know anything about optics. Just basic concepts of algebraic data types, functors, and typeclasses would suffice.</p>
+<p>In Haskell, if you write the syntax of the EDSL with algebraic data types, basic pattern matching is already built in. For a simple imperative language defined by the data types:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">AExp</span> <span class="ot">=</span> <span class="dt">ALit</span> <span class="dt">Int</span> <span class="op">|</span> <span class="dt">AVar</span> <span class="dt">String</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a>          <span class="op">|</span> <span class="dt">AAdd</span> <span class="dt">AExp</span> <span class="dt">AExp</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">BExp</span> <span class="ot">=</span> <span class="dt">BLit</span> <span class="dt">Bool</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true"></a>            <span class="co">-- less than or equal to</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true"></a>          <span class="op">|</span> <span class="dt">BLe</span>  <span class="dt">AExp</span> <span class="dt">AExp</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true"></a>          <span class="op">|</span> <span class="dt">BAnd</span> <span class="dt">BExp</span> <span class="dt">BExp</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true"></a></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">Stmt</span> <span class="ot">=</span> <span class="dt">SAssign</span> <span class="dt">String</span> <span class="dt">AExp</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true"></a>            <span class="co">-- If-then-else</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true"></a>          <span class="op">|</span> <span class="dt">SIte</span> <span class="dt">BExp</span> <span class="dt">Stmt</span> <span class="dt">Stmt</span></span></code></pre></div>
+<p>We can pattern match on an <code>Stmt</code> value with</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a><span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true"></a>  <span class="dt">SAssign</span> v expr      <span class="ot">-&gt;</span> <span class="op">...</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true"></a>  <span class="dt">SIte</span>    b stmt stmt <span class="ot">-&gt;</span> <span class="op">...</span></span></code></pre></div>
+<p>These are all good for top-level definitions, however, it can be quite cumbersome to pattern match something that’s deep in the structure. Say we want to write a renaming function. It accepts a function from variable names to variable names, like <code>\s -&gt; "new_" ++ s</code>. Then it will change a <code>Stmt</code> tree to a new tree with variable names replaced. This is usually defined recursively:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true"></a><span class="ot">subs_s ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span>) <span class="ot">-&gt;</span> <span class="dt">Stmt</span> <span class="ot">-&gt;</span> <span class="dt">Stmt</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true"></a>subs_s rho s <span class="ot">=</span> <span class="kw">case</span> s <span class="kw">of</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true"></a>  <span class="dt">SAssign</span> v a  <span class="ot">-&gt;</span> <span class="dt">SAssign</span> (rho v) (subs_a rho a)</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true"></a>  <span class="dt">SIte</span> b s1 s2 <span class="ot">-&gt;</span> <span class="dt">SIte</span> (subs_b rho b) (subs_s rho s1) (subs_s rho s2)</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true"></a></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true"></a><span class="ot">subs_a ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span>) <span class="ot">-&gt;</span> <span class="dt">AExp</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true"></a>subs_a rho a <span class="ot">=</span> <span class="kw">case</span> a <span class="kw">of</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true"></a>  <span class="dt">ALit</span> _     <span class="ot">-&gt;</span> a</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true"></a>  <span class="dt">AVar</span> v     <span class="ot">-&gt;</span> <span class="dt">AVar</span> (rho v)</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true"></a>  <span class="dt">AAdd</span> a1 a2 <span class="ot">-&gt;</span> <span class="dt">AAdd</span> (subs_a rho a1) (subs_a rho a2)</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true"></a></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true"></a><span class="ot">subs_b ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span>) <span class="ot">-&gt;</span> <span class="dt">BExp</span> <span class="ot">-&gt;</span> <span class="dt">BExp</span></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true"></a>subs_b rho b <span class="ot">-&gt;</span> <span class="kw">case</span> bexp <span class="kw">of</span></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true"></a>  <span class="dt">BLit</span> _     <span class="ot">-&gt;</span> b</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true"></a>  <span class="dt">BLe</span>  a1 a2 <span class="ot">-&gt;</span> <span class="dt">BLe</span>  (subs_a rho a1) (subs_a rho a2)</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true"></a>  <span class="dt">BAnd</span> b1 b2 <span class="ot">-&gt;</span> <span class="dt">BAnd</span> (subs_b rho b1) (subs_b rho b2)</span></code></pre></div>
+<p>If we then proceed to write another function to perform application. This function will take a function from variables to integer numbers. And then it takes a <code>Stmt</code> tree and returns a new tree with variables replaced with the numbers.</p>
+<p>At first glance, we seem to be able to write a more general function <code>subs_s_var</code> that takes a substitution function of the type <code>String -&gt; AExp</code> to unify them. But remember we are in an imperative language. The substitution from variables to values should not happen to the target variable for an assignment statement (the so-called “left value”). Therefore, the implementation is slightly different:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a><span class="ot">apply_s ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span> <span class="dt">Stmt</span> <span class="ot">-&gt;</span> <span class="dt">Stmt</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true"></a>apply_s rho s <span class="ot">=</span> <span class="kw">case</span> s <span class="kw">of</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true"></a>  <span class="dt">SAssign</span> v a  <span class="ot">-&gt;</span> <span class="dt">SAssign</span> v (apply_a rho a)</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true"></a>  <span class="dt">SIte</span> b s1 s2 <span class="ot">-&gt;</span> <span class="dt">SIte</span> (apply_b rho b) (apply_s rho s1) (apply_s rho s2)</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true"></a><span class="ot">apply_a ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span> <span class="dt">AExp</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true"></a>apply_a rho a <span class="ot">=</span> <span class="kw">case</span> a <span class="kw">of</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true"></a>  <span class="dt">ALit</span> _     <span class="ot">-&gt;</span> a</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true"></a>  <span class="dt">AVar</span> v     <span class="ot">-&gt;</span> <span class="dt">ALit</span> (rho v)</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true"></a>  <span class="dt">AAdd</span> a1 a2 <span class="ot">-&gt;</span> <span class="dt">AAdd</span> (apply_a rho a1) (apply_a rho a2)</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true"></a><span class="ot">apply_b ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span> <span class="dt">BExp</span> <span class="ot">-&gt;</span> <span class="dt">BExp</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true"></a>apply_b rho b <span class="ot">-&gt;</span> <span class="kw">case</span> bexp <span class="kw">of</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true"></a>  <span class="dt">BLit</span> _     <span class="ot">-&gt;</span> b</span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true"></a>  <span class="dt">BLe</span>  a1 a2 <span class="ot">-&gt;</span> <span class="dt">BLe</span>  (apply_a rho a1) (apply_a rho a2)</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true"></a>  <span class="dt">BAnd</span> b1 b2 <span class="ot">-&gt;</span> <span class="dt">BAnd</span> (apply_b rho b1) (apply_b rho b2)</span></code></pre></div>
+<p>Notice in the function <code>apply_s</code>, we leave the <code>v</code> in <code>SAssign v a</code> unchanged. In contrast, the function <code>subs_s</code> changes <code>v</code> to <code>rho v</code>. Actually in the application case, the only place where we replace the variable with a value is in <code>apply_a</code>: if we find an <code>AVar v</code>, we change it to <code>ALit (rho v)</code>.</p>
+<p>From these two sets of functions, we can see that the pattern we want to match is not “every appearance of a variable”, but “every appearance of a variable within an expression (either an <code>AExp</code> or a <code>BExp</code>)”. This is an example of the need for nuanced patterns. The pattern “every variable in an expression” can be abstracted from the common parts of <code>subs_s</code> and <code>apply_s</code>:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true"></a><span class="ot">aexp_avar ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span>) <span class="ot">-&gt;</span> <span class="dt">AExp</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true"></a>aexp_avar rho a <span class="ot">=</span> <span class="kw">case</span> a <span class="kw">of</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true"></a>  <span class="dt">ALit</span> _     <span class="ot">-&gt;</span> a</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true"></a>  <span class="dt">AVar</span> v     <span class="ot">-&gt;</span> rho v</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true"></a>  <span class="dt">AAdd</span> a1 a2 <span class="ot">-&gt;</span> <span class="dt">AAdd</span> (aexp_avar rho a1) (aexp_avar rho a2)</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true"></a></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true"></a><span class="ot">bexp_avar ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span>) <span class="ot">-&gt;</span> <span class="dt">BExp</span> <span class="ot">-&gt;</span> <span class="dt">BExp</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true"></a>bexp_avar rho b <span class="ot">-&gt;</span> <span class="kw">case</span> bexp <span class="kw">of</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true"></a>  <span class="dt">BLit</span> _     <span class="ot">-&gt;</span> b</span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true"></a>  <span class="dt">BLe</span>  a1 a2 <span class="ot">-&gt;</span> <span class="dt">BLe</span>  (aexp_avar rho a1) (aexp_avar rho a2)</span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true"></a>  <span class="dt">BAnd</span> b1 b2 <span class="ot">-&gt;</span> <span class="dt">BAnd</span> (bexp_avar rho b1) (bexp_avar rho b2)</span></code></pre></div>
+<p>These two functions together express the idea of pattern matching a variable inside an <code>AExp</code> or a <code>BExp</code>, when such a variable is found, it will be changed into an <code>AExp</code> by applying <code>rho</code>, and a new tree is constructed accordingly.</p>
+<p>The functions <code>subs_s</code> and <code>apply_s</code> can share the same pattern matching path when they go from <code>AExp</code> to <code>AVar</code>. So they only need to specify how to go from a <code>Stmt</code> to an <code>AExp</code>.</p>
+<p>For <code>subs_s</code>, we may find <code>AVar</code> in the target and value of <code>SAssign</code>, as well as in the condition and clauses of <code>SIte</code>. On the other hand, for <code>apply_s</code>, we will go from a <code>Stmt</code> to an <code>AExp</code> by leaving out the assignment target part.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a><span class="ot">subs_s ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span>) <span class="ot">-&gt;</span> <span class="dt">Stmt</span> <span class="ot">-&gt;</span> <span class="dt">Stmt</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true"></a>subs_s rho s <span class="ot">=</span> <span class="kw">case</span> s <span class="kw">of</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true"></a>  <span class="dt">SAssign</span> v a  <span class="ot">-&gt;</span> <span class="dt">SAssign</span> (rho v) (subs_a rho a)</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true"></a>  <span class="dt">SIte</span> b s1 s2 <span class="ot">-&gt;</span> <span class="dt">SIte</span> (subs_b rho b) (subs_s rho s1) (subs_s rho s2)</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true"></a></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true"></a><span class="ot">apply_s ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span> <span class="dt">Stmt</span> <span class="ot">-&gt;</span> <span class="dt">Stmt</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true"></a>apply_s rho s <span class="ot">=</span> <span class="kw">case</span> s <span class="kw">of</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true"></a>  <span class="dt">SAssign</span> v a  <span class="ot">-&gt;</span> <span class="dt">SAssign</span> v (apply_a rho a)</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true"></a>  <span class="dt">SIte</span> b s1 s2 <span class="ot">-&gt;</span> <span class="dt">SIte</span> (apply_b rho b) (apply_s rho s1) (apply_s rho s2)</span></code></pre></div>
+<p>The above functions specifies how to go from a <code>Stmt</code> to an <code>AExp</code> or a <code>BExp</code>. Then we only need to specify how to go from an <code>AExp</code> or a <code>BExp</code> to a <code>AVar</code> and what to do when such a pattern matching succeeds. This can be easily done by:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="ot">subs_a ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span>) <span class="ot">-&gt;</span> <span class="dt">AExp</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a>subs_a rho <span class="ot">=</span> aexp_avar (<span class="dt">AVar</span> <span class="op">.</span> rho)</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true"></a><span class="ot">subs_b ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span>) <span class="ot">-&gt;</span> <span class="dt">BExp</span> <span class="ot">-&gt;</span> <span class="dt">BExp</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true"></a>subs_b rho <span class="ot">=</span> bexp_avar (<span class="dt">AVar</span> <span class="op">.</span> rho)</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true"></a></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true"></a><span class="ot">apply_a ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span> <span class="dt">AExp</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true"></a>apply_a rho <span class="ot">=</span> aexp_avar (<span class="dt">ALit</span> <span class="op">.</span> rho)</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true"></a></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true"></a><span class="ot">apply_b ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span> <span class="dt">BExp</span> <span class="ot">-&gt;</span> <span class="dt">BExp</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true"></a>apply_b rho <span class="ot">=</span> bexp_avar (<span class="dt">ALit</span> <span class="op">.</span> rho)</span></code></pre></div>
+<p>Let’s review what we’ve done here. We break up the process of going from a <code>Stmt</code> to <code>AVar</code> into three steps:</p>
+<ol type="1">
+<li>We specify how to go from a <code>Stmt</code> to <code>AExp</code> and <code>BExp</code> for each function, because we are taking different pattern matching paths to expressions.</li>
+<li>Then we abstract a common pattern to go from <code>AExp</code> and <code>BExp</code> to <code>AVar</code>. This pattern matching path is the same for both functions. So we come up with <code>aexp_avar</code> and <code>bexp_avar</code> to do just that, then <code>subs_a</code>, <code>apply_a</code>, and other functions are implemented using these patterns.</li>
+<li>Finally, we plug the pieces back to <code>subs_s</code> and <code>apply_s</code>, to get the whole pattern matching path.</li>
+</ol>
+<p>In this way, we can write less code when implementing <code>subs_a</code> and so on. Furthermore, actions are decoupled with the pattern matching process. <code>aexp_avar</code> and <code>bexp_avar</code> can be viewed as individual stored pattern matching paths. They leave out what to do if the pattern matching succeeds, as long as it gets an <code>AExp</code> in the end to replace the matched variable.</p>
+<p>As is with all decouplings, we also get benefits when the structure changes. Suppose we want to add a new constructor to the definition of <code>BExp</code>:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">BExp</span> <span class="ot">=</span> <span class="op">...</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a>          <span class="op">|</span> <span class="dt">BNeg</span> <span class="dt">BExp</span></span></code></pre></div>
+<p>We only need to change how we go from a <code>BExp</code> to an <code>AExp</code>:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true"></a><span class="ot">bexp_avar ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span>) <span class="ot">-&gt;</span> <span class="dt">BExp</span> <span class="ot">-&gt;</span> <span class="dt">BExp</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true"></a>bexp_avar rho b <span class="ot">-&gt;</span> <span class="kw">case</span> b <span class="kw">of</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true"></a>  <span class="op">...</span>     <span class="ot">-&gt;</span> <span class="op">...</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true"></a>  <span class="dt">BNeg</span> b' <span class="ot">-&gt;</span> <span class="dt">BNeg</span> (bexp_avar rho b')</span></code></pre></div>
+<p>All other functions remain the same. After all, we are only adding a new way to go from a <code>BExp</code> to an <code>AExp</code>. This shouldn’t change how to go from a <code>Stmt</code> to an <code>AExp</code> and other paths.</p>
+<p>These “stored pattern matching paths” also combine with each other if the types match. Say we want to do some evaluation, but we want to restrict the process to only the condition of each “if-then-else” block, maybe for some optimization reasons. We already know how to get from an <code>AExp</code> to a variable, now we only need to figure out how to get from a <code>Stmt</code> to <code>AExp</code> in <code>if-then-else</code> conditions.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true"></a><span class="ot">stmt_ite_aexp ::</span> (<span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">AExp</span>) <span class="ot">-&gt;</span> <span class="dt">Stmt</span> <span class="ot">-&gt;</span> <span class="dt">Stmt</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true"></a>stmt_ite_aexp rho s <span class="ot">=</span> <span class="kw">case</span> s <span class="kw">of</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true"></a>  <span class="dt">SAssign</span> _ _  <span class="ot">-&gt;</span> s</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true"></a>  <span class="dt">SIte</span> b s1 s2 <span class="ot">-&gt;</span> <span class="dt">SIte</span> (bexp_avar rho b) s1 s2</span></code></pre></div>
+<p>Notice how we “stringed” the two paths together: from <code>Stmt</code> to <code>AExp</code>, then from <code>AExp</code> to <code>AVar</code>.</p>
+<p>In conclusion, we have obtained a good of way of doing pattern matching for our EDSL, with the following advantages:</p>
+<ol type="1">
+<li>It is expressive enough for complex patterns.</li>
+<li>Many patterns can be reused, due to the decoupling of actions from the pattern matching process.</li>
+<li>When the syntax changes, the patterns can be changed in a small, predictable, and local scope.</li>
+<li>Patterns are composable.</li>
+</ol>
+<p>However, this representation still has two shortcomings:</p>
+<ol type="1">
+<li>We don’t have the concept of “failure” in the process of pattern matching. A new tree is returned, but we don’t know whether any pattern matching took place. We may need such information, for example, when trying to answer whether there are no more patterns to match, i.e. whether there are no applicable evaluation rules.</li>
+<li>The composition is not clear. In <code>stmt_ite_a</code>, it is not obvious we are going from a <code>Stmt</code> to a condition <code>BExp</code> of an “if-then-else” block, and then from an <code>BExp</code> to <code>AExp</code>. This is because the sub-pattern-matching is inserted in the middle of the function.</li>
+</ol>
+<p>We now take the same idea, but use a new way to represent “pattern matching functions”, which aims to address these two problems.</p>
+<h2 id="targeted-language">Targeted language</h2>
+<p>To demonstrate the advantages of the representation, we expand the above toy language to a more complete yet still small EDSL.</p>
+<p>We target a simple imperative language called <a href="https://github.com/crvdgc/imp-interpreter/blob/master/imp.md">IMP</a> from a K-framework’s tutorial. The language embedded in Haskell looks like this:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">AExp</span> v <span class="ot">=</span> <span class="dt">ALit</span> <span class="dt">Int</span> <span class="op">|</span> <span class="dt">AVar</span> v</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">ANeg</span> <span class="dt">Int</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">ADiv</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">AAdd</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true"></a></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">BExp</span> v <span class="ot">=</span> <span class="dt">BLit</span> <span class="dt">Bool</span></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true"></a>              <span class="co">-- less than or equal to</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">BLe</span>  (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">BNeg</span> (<span class="dt">BExp</span> v)</span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">BAnd</span> (<span class="dt">BExp</span> v) (<span class="dt">BExp</span> v)</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true"></a></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true"></a><span class="co">-- empty block is Nothing</span></span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">Block</span> v <span class="ot">=</span> <span class="dt">Maybe</span> (<span class="dt">Stmt</span> v)</span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true"></a></span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">Stmt</span> v <span class="ot">=</span> <span class="dt">SBlock</span>  (<span class="dt">Block</span> v)</span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">SAssign</span> v (<span class="dt">AExp</span> v)</span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true"></a>              <span class="co">-- If-then-else</span></span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">SIte</span>    (<span class="dt">BExp</span> v) (<span class="dt">Block</span> v) (<span class="dt">Block</span> v)</span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">SWhile</span>  (<span class="dt">BExp</span> v) (<span class="dt">Block</span> v)</span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">SSeq</span>    (<span class="dt">Stmt</span> v) (<span class="dt">Stmt</span> v)</span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true"></a>              <span class="co">-- identity of SSeq</span></span>
+<span id="cb11-22"><a href="#cb11-22" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">SUnit</span></span></code></pre></div>
+<p>Compared with the example from the introduction, IMP has a richer set of structures. You can write quite a lot of programs with IMP. For some example programs written with this embedded IMP, see <a href="https://github.com/crvdgc/imp-interpreter/blob/master/imp-interpreter/test/Test/Files.hs">this page</a>. The corresponding actual IMP programs that can be interpreted by K-framework tools like <code>kompiler</code> can be found in <a href="https://github.com/crvdgc/imp-interpreter/tree/master/imp-interpreter/test/files">test files</a>.</p>
+<h2 id="method">Method</h2>
+<h3 id="representation-of-pattern-matchings">Representation of pattern matchings</h3>
+<p>We will now proceed to define pattern matchings, and use a type to express our definition.</p>
+<p><strong>Definition.</strong> A pattern matching for a algebraic data type is a function, when given a (possibly failing) substitution of the substructure, can give a substitution of the whole structure.</p>
+<p>For example, when pattern matching on <code>AVar</code> in <code>AExp</code>, what we are saying is that given a substitution for <code>AVar</code>, we know how to construct an <code>AExp</code> as a result for this substitution.</p>
+<p>This obviously doesn’t cover every meaning of the term “pattern matching”, but here we consider it to be a good fit for our purpose of AST evaluation. We can use the following type to express our definition:</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchInto</span> s t a b <span class="ot">=</span> (a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> b) <span class="ot">-&gt;</span> s <span class="ot">-&gt;</span> <span class="dt">Maybe</span> t</span></code></pre></div>
+<p>This type means if given a possibly failing substitution of the substructure <code>a</code> to <code>b</code> (i.e. a function <code>a -&gt; Maybe b</code>), we can construct a possibly failing substitution for the overall structure <code>s</code> and change it into <code>t</code>.</p>
+<p>For our evaluation process, an evaluation rule always preserves the type of the value (or more precisely, the reducible expression), i.e. no rule can change an <code>AExp</code> to a <code>BExp</code>. Therefore, we can use a less general type:</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchInto'</span> s a <span class="ot">=</span> <span class="dt">MatchInto</span>  s s a a</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchSelf</span>  a   <span class="ot">=</span> <span class="dt">MatchInto'</span> a   a</span></code></pre></div>
+<p>It can be illustrating to expand the type definitions:</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchInto'</span> s a <span class="ot">=</span> (a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a) <span class="ot">-&gt;</span> s <span class="ot">-&gt;</span> <span class="dt">Maybe</span> s</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchSelf</span>  a   <span class="ot">=</span> (a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a) <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a</span></code></pre></div>
+<p>The difference between the two types is that <code>MatchInto'</code> may move into a different type to continue the pattern matching, while <code>MatchSelf</code> says that the substructure has the same type of the matched pattern.</p>
+<p>For example, an <code>AExp</code> in the <code>BLe AExp AExp</code> will change the type of pattern matching from a <code>BExp</code> to an <code>AExp</code>, while the <code>AExp</code> in <code>AAdd AExp AExp</code> will not change. This is quite handy when we discuss recursively pattern matching into substructures, since a successful pattern matching will return a same type, we can continue to match into the substructures recursively.</p>
+<h3 id="simple-patten-matching-functions">Simple patten matching functions</h3>
+<p>Let’s see some examples to get a hang of it.</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true"></a><span class="ot">aLit ::</span> <span class="dt">MatchSelf</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true"></a>aLit f e <span class="ot">=</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true"></a>  <span class="dt">ALit</span> _ <span class="ot">-&gt;</span> f e</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true"></a>  _      <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>This means <code>aLit</code> is a pattern matching from an <code>AExp v</code> to <code>AExp v</code>. When the constructor is <code>ALit</code>, the matching succeeds, it will apply the substitution function <code>f</code>, which will produce a result of <code>Maybe (AExp v)</code>. We use this substitution result to replace the matched <code>AExp v</code> in the whole tree. Otherwise, the pattern matching fails and returns a <code>Nothing</code>.</p>
+<p>Note: it is not guaranteed that if the pattern matching succeeds, the substitution will also succeed and return a <code>Just</code> value. The substitution may be partial, for example:</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true"></a><span class="ot">keep5 ::</span> <span class="dt">AExp</span> v   <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true"></a>keep5    (<span class="dt">ALit</span> <span class="dv">5</span>) <span class="ot">=</span>  <span class="dt">Just</span> (<span class="dt">ALit</span> <span class="dv">5</span>)</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true"></a>keep5    _        <span class="ot">=</span>  <span class="dt">Nothing</span></span></code></pre></div>
+<p><code>keep5</code> will fail on <code>ALit 6</code> when performing the pattern matching, i.e. <code>aLit keep5 (ALit 6)</code> will return a <code>Nothing</code>, although the pattern matching on the constructor succeeds.</p>
+<p>One might be tempted to conclude that for each constructor of the sum type, we will produce exactly one pattern matching function. However, we are free to choose onto which substructure to apply the substitution function, for example, the whole structure, one of the arguments, or some subset of the arguments. An example of this distinction is as follows:</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true"></a><span class="ot">bNeg ::</span> <span class="dt">MatchSelf</span> (<span class="dt">BExp</span> v)</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true"></a>bNeg f e <span class="ot">=</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true"></a>  <span class="dt">BNeg</span> _ <span class="ot">-&gt;</span> f e</span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true"></a>  _      <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true"></a></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true"></a><span class="ot">bNegArg ::</span> <span class="dt">MatchSelf</span> (<span class="dt">BExp</span> v)</span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true"></a>bNegArg f e <span class="ot">=</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true"></a>  <span class="dt">BNeg</span> e' <span class="ot">-&gt;</span> <span class="dt">BNeg</span> <span class="op">&lt;$&gt;</span> f e'</span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true"></a>  _       <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>Although both functions match on the same constructor <code>BNeg</code>, the pattern <code>bNeg</code> applies the substitution on the whole structure, while <code>bNegArg</code> only applies it into the subexpression, and wrap it up with the same <code>BNeg</code> constructor. The former function is more general because it can choose to change the constructor to any <code>BExp v</code> constructor, e.g.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true"></a><span class="ot">negLit ::</span> <span class="dt">BExp</span> v <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (<span class="dt">BExp</span> v)</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true"></a>negLit <span class="ot">=</span> bNeg <span class="op">$</span> \b <span class="ot">-&gt;</span> <span class="kw">case</span> b <span class="kw">of</span></span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true"></a>  <span class="dt">BNeg</span> (<span class="dt">BLit</span> b) <span class="ot">-&gt;</span> <span class="dt">Just</span> <span class="op">$</span> <span class="dt">BLit</span> (<span class="fu">not</span> b)</span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true"></a>  _             <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>Then <code>bNeg negLit (BNeg (BLit True))</code> returns <code>Just (BLit False)</code>, while <code>bNegArg negLit (BNeg (BLit True))</code> will return <code>Nothing</code>, because it expects to see a <code>BNeg</code> in the argument of the top structure, but gets a <code>BLit</code> instead. On the other hand <code>bNegArg negLit (BNeg (BNeg (BLit True)))</code> will succeed by returning <code>Just (BNeg (BLit False))</code>.</p>
+<h3 id="composing-pattern-matching-functions">Composing pattern matching functions</h3>
+<p>Recall the type of <code>MatchInto'</code>:</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchInto</span>  s t a b <span class="ot">=</span> (a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> b) <span class="ot">-&gt;</span> s <span class="ot">-&gt;</span> <span class="dt">Maybe</span> t</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">MatchInto'</span> s   a   <span class="ot">=</span> <span class="dt">MatchInto</span> s s a a</span></code></pre></div>
+<p>Observe the expanded type of <code>type MatchInto' s a = (a -&gt; Maybe a) -&gt; (s -&gt; Maybe s)</code>. We can easily see if we have <code>aToB :: MatchInto' a b</code> and <code>bToC :: MatchInto' b c</code>, then the composed pattern <code>aToC = aToB . bToC</code> has the type <code>MatchInto' a c</code>, which will pattern match into the overall big structure <code>a</code> and get matches of the smallest substructure <code>c</code>.</p>
+<p>For example, even if we don’t know the implementation, just by reading the types, we will be able to tell whether and how the pattern matchings will compose.</p>
+<div class="sourceCode" id="cb20"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true"></a><span class="ot">aAddArg        ::</span> <span class="dt">MatchInto'</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true"></a><span class="ot">aLit           ::</span> <span class="dt">MatchInto'</span>          (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true"></a>aAddArg <span class="op">.</span><span class="ot"> aLit ::</span> <span class="dt">MatchInto'</span> (<span class="dt">AExp</span> v)          (<span class="dt">AExp</span> v)</span></code></pre></div>
+<p>Supposedly, the composed pattern will match arithmetic literals in arguments of <code>AAdd</code>. For example, <code>(aAddArg . aLit) (\_ -&gt; Just (ALit 0)) (AAdd (ALit 1) (AVar "x"))</code> will return <code>Just (AAdd (ALit 0) (AVar "x"))</code>.</p>
+<p>The following composed pattern matching function will match an <code>ADiv</code> expression which appears in an argument of a <code>BLe</code> expression.</p>
+<div class="sourceCode" id="cb21"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true"></a><span class="ot">bLeArg        ::</span> <span class="dt">MatchInto'</span> (<span class="dt">BExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true"></a><span class="ot">aDiv          ::</span> <span class="dt">MatchInto'</span>          (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true"></a>bLeArg <span class="op">.</span><span class="ot"> aDiv ::</span> <span class="dt">MatchInto'</span> (<span class="dt">BExp</span> v)          (<span class="dt">AExp</span> v)</span></code></pre></div>
+<p>We can also compose more than one pattern matching functions, to get a more complex pattern:</p>
+<div class="sourceCode" id="cb22"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true"></a><span class="ot">sIteCond               ::</span> <span class="dt">MatchInto'</span> (<span class="dt">Stmt</span> v) (<span class="dt">BExp</span> v)</span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true"></a><span class="ot">bNeg                   ::</span> <span class="dt">MatchInto'</span>          (<span class="dt">BExp</span> v) (<span class="dt">BExp</span> v)</span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true"></a><span class="ot">bLit                   ::</span> <span class="dt">MatchInto'</span>                   (<span class="dt">BExp</span> v) (<span class="dt">BExp</span> v)</span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true"></a>sIteCond <span class="op">.</span> bNeg <span class="op">.</span><span class="ot"> bLit ::</span> <span class="dt">MatchInto'</span> (<span class="dt">Stmt</span> v)                   (<span class="dt">BExp</span> v)</span></code></pre></div>
+<p>For those who are familiar with the concept, this should immediately remind you of the power of optics. In fact, <code>MatchInto</code> is indeed similar to a kind of optics called prisms. We will return to that in the end. But right now, neither the definition nor the implementation requires any knowledge about optics. And we have a quite good intuition of the meaning of each part.</p>
+<h3 id="pattern-matching-combinators">Pattern matching combinators</h3>
+<p>It is straightforward to manually write out all the pattern matching functions for the entire syntax tree. However, there are some patterns that can be extracted into combinators to facilitate the process.</p>
+<p>A basic example is a binary constructor, by which we mean a constructor with two substructures of the same type. This is only a contingent feature of the IMP language, it may not be useful to other EDSL. However, it’s easy to come up with new pattern matching paths and combine them together.</p>
+<p>For binary constructors, what we want to do is to match into both of the substructures. If either of them succeeds, we will replace that succeeded substructure with the result of applying the substitution. The other substructure remains the same. And we construct a new tree using the same constructor.</p>
+<div class="sourceCode" id="cb23"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true"></a><span class="ot">binaryConstr ::</span> (a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a) <span class="ot">-&gt;</span> (a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> b) <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> b</span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true"></a>binaryConstr f constr a1 a2 <span class="ot">=</span></span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true"></a>  <span class="kw">let</span> aL <span class="ot">=</span> <span class="fu">flip</span> constr a2 <span class="op">&lt;$&gt;</span> f a1</span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true"></a>      aR <span class="ot">=</span> constr a1 <span class="op">&lt;$&gt;</span> f a2</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true"></a>   <span class="kw">in</span> aL <span class="op">&lt;|&gt;</span> aR</span></code></pre></div>
+<p>Here we are using the <a href="https://hackage.haskell.org/package/base-4.15.0.0/docs/Control-Applicative.html#t:Alternative"><code>Alternative</code></a> instance of <code>Maybe</code>. The definition is as follows:</p>
+<div class="sourceCode" id="cb24"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true"></a><span class="kw">instance</span> <span class="dt">Alternative</span> <span class="dt">Maybe</span> <span class="kw">where</span></span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true"></a>  empty <span class="ot">=</span> <span class="dt">Nothing</span></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true"></a>  <span class="dt">Nothing</span> <span class="op">&lt;|&gt;</span> r <span class="ot">=</span> r</span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true"></a>  l       <span class="op">&lt;|&gt;</span> _ <span class="ot">=</span> l</span></code></pre></div>
+<p>In short, this means we will go through some <code>Maybe</code> values, if we meet a <code>Nothing</code>, the search continues, otherwise, we’ve found a <code>Just</code> value, then we stop the search and return the <code>Just</code> value. If all we’ve met along the way are <code>Nothing</code> values, we will return a <code>Nothing</code> value in the end.</p>
+<p>An example of <code>binaryConstr</code> is:</p>
+<div class="sourceCode" id="cb25"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true"></a><span class="ot">bLeArg ::</span> <span class="dt">MatchInto'</span> (<span class="dt">BExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true"></a>bLeArg f <span class="ot">=</span> \e <span class="ot">-&gt;</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb25-3"><a href="#cb25-3" aria-hidden="true"></a>  <span class="dt">BLe</span> e1 e2 <span class="ot">-&gt;</span> binaryConstr f <span class="dt">BLe</span> e1 e2</span>
+<span id="cb25-4"><a href="#cb25-4" aria-hidden="true"></a>  _         <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p><code>bLeArg</code> matches into two arguments of a <code>BLe</code> constructor.</p>
+<p>Remember the discussion about matching a thing itself and matching its substructures? If the matched substructure has the same type of the overall structure, then we can recursively match into it. For binary constructors, this provide a different combinator:</p>
+<div class="sourceCode" id="cb26"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true"></a><span class="ot">binaryRec ::</span> (a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a) <span class="ot">-&gt;</span> (a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a) <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a</span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true"></a>binaryRec f constr a1 a2 a <span class="ot">=</span></span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true"></a>  <span class="kw">let</span> aL <span class="ot">=</span> <span class="fu">flip</span> constr a2 <span class="op">&lt;$&gt;</span> f a1</span>
+<span id="cb26-4"><a href="#cb26-4" aria-hidden="true"></a>      aR <span class="ot">=</span> constr a1 <span class="op">&lt;$&gt;</span> f a2</span>
+<span id="cb26-5"><a href="#cb26-5" aria-hidden="true"></a>      aS <span class="ot">=</span> f a</span>
+<span id="cb26-6"><a href="#cb26-6" aria-hidden="true"></a>   <span class="kw">in</span> aL <span class="op">&lt;|&gt;</span> aR <span class="op">&lt;|&gt;</span> aS</span></code></pre></div>
+<p>We add the result of matching the term itself <code>aS = f a</code> to the possible results, by connecting <code>aS</code> to other results with <code>&lt;|&gt;</code>.</p>
+<p>If we really want, we can write such a pattern:</p>
+<div class="sourceCode" id="cb27"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true"></a><span class="ot">aAddWithArgs ::</span> <span class="dt">MatchSelf</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true"></a>aAddWithArgs f e <span class="ot">=</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true"></a>  <span class="dt">AAdd</span> e1 e2 <span class="ot">-&gt;</span> binaryRec f <span class="dt">AAdd</span> e1 e2 e</span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true"></a>  _          <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>However, as we will explain later, we choose to use a more general way for recursively pattern matching substructures. For now, we only provide two patterns for the constructor <code>AAdd</code>:</p>
+<div class="sourceCode" id="cb28"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true"></a><span class="ot">aAdd ::</span> <span class="dt">MatchSelf</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true"></a>aAdd f e <span class="ot">=</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true"></a>  <span class="dt">AAdd</span> _ _ <span class="ot">-&gt;</span> f e</span>
+<span id="cb28-4"><a href="#cb28-4" aria-hidden="true"></a>  _        <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span>
+<span id="cb28-5"><a href="#cb28-5" aria-hidden="true"></a></span>
+<span id="cb28-6"><a href="#cb28-6" aria-hidden="true"></a><span class="ot">aAddArg ::</span> <span class="dt">MatchSelf</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb28-7"><a href="#cb28-7" aria-hidden="true"></a>aAddArg f e <span class="ot">=</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb28-8"><a href="#cb28-8" aria-hidden="true"></a>  <span class="dt">AAdd</span> e1 e2 <span class="ot">-&gt;</span> binaryConstr f <span class="dt">AAdd</span> e1 e2</span>
+<span id="cb28-9"><a href="#cb28-9" aria-hidden="true"></a>  _          <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p><code>aAdd</code> matches the structure itself, while <code>aAddArg</code> matches exactly the two arguments without touching the overall structure.</p>
+<h3 id="recursive-pattern-matching">Recursive pattern matching</h3>
+<p>A recursively pattern matching into substructures process can be done through the following steps:</p>
+<ol type="1">
+<li>Try to match itself.</li>
+<li>If 1 fails, find the substructures with the same type.</li>
+<li>Recursively match into substructures.</li>
+</ol>
+<p>This combinator is provided as a typeclass.</p>
+<div class="sourceCode" id="cb29"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true"></a><span class="kw">class</span> <span class="dt">RecursiveMatch</span> a <span class="kw">where</span></span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true"></a><span class="ot">  recursiveMatch ::</span> <span class="dt">MatchSelf</span> a</span>
+<span id="cb29-3"><a href="#cb29-3" aria-hidden="true"></a>  recursiveMatch f e <span class="ot">=</span> f e <span class="op">&lt;|&gt;</span> subMatch (recursiveMatch f) e</span>
+<span id="cb29-4"><a href="#cb29-4" aria-hidden="true"></a></span>
+<span id="cb29-5"><a href="#cb29-5" aria-hidden="true"></a><span class="ot">  subMatch       ::</span> <span class="dt">MatchSelf</span> a</span></code></pre></div>
+<p><code>recursiveMatch</code> does exactly steps 1-3. For any <code>RecursiveMatch</code> instance, we have to specify how to find substructures.</p>
+<p>For example, recall the definition of <code>AExp</code>:</p>
+<div class="sourceCode" id="cb30"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true"></a><span class="kw">data</span> <span class="dt">AExp</span> v <span class="ot">=</span> <span class="dt">ALit</span> <span class="dt">Int</span> <span class="op">|</span> <span class="dt">AVar</span> v</span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">ANeg</span> <span class="dt">Int</span></span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">ADiv</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true"></a>            <span class="op">|</span> <span class="dt">AAdd</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span></code></pre></div>
+<p>For a substructure to also have the type <code>AExp</code>, it must belong to either the arguments of <code>ADiv</code> or the arguments of <code>AAdd</code>. Therefore, the instance for <code>AExp</code> can be defined as:</p>
+<div class="sourceCode" id="cb31"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true"></a><span class="kw">instance</span> <span class="dt">RecursiveMatch</span> (<span class="dt">AExp</span> v) <span class="kw">where</span></span>
+<span id="cb31-2"><a href="#cb31-2" aria-hidden="true"></a><span class="ot">  subMatch ::</span> <span class="dt">MatchSelf</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb31-3"><a href="#cb31-3" aria-hidden="true"></a>  subMatch f s <span class="ot">=</span> aDivArg f s <span class="op">&lt;|&gt;</span> aAddArg f s</span></code></pre></div>
+<p>And now when we can use <code>recursiveMatch</code> from the typeclass to get all <code>AExp</code> in an <code>AExp</code> with an arbitrary depth of unfolding (and also itself). This is a technique called anamorphism, which can be intuitively understood as a mechanism to unfold over a structure. This is why we choose to provide only the patterns to match substructures instead of using <code>binaryRec</code>.</p>
+<p>One last combinator in our toolbox, the <code>possibly</code> combinator will try pattern matching functions from a list, if any of them succeeds (i.e. returns a <code>Just</code> value), then the whole pattern matching succeeds. This is like <code>concat</code> from <code>Data.Foldable</code>, except we are using the <code>Alternative</code> instance, so what we want is <a href="https://hackage.haskell.org/package/base-4.15.0.0/docs/Data-Foldable.html#v:asum"><code>asum</code></a>:</p>
+<div class="sourceCode" id="cb32"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true"></a><span class="ot">possibly ::</span> [<span class="dt">MatchInto'</span> s a] <span class="ot">-&gt;</span> <span class="dt">MatchInto'</span> s a</span>
+<span id="cb32-2"><a href="#cb32-2" aria-hidden="true"></a>possibly patterns f s <span class="ot">=</span> asum <span class="op">.</span> <span class="fu">map</span> (\p <span class="ot">-&gt;</span> p f s) <span class="op">$</span> patterns</span></code></pre></div>
+<p>Then the recursively matching turns into listing substructures:</p>
+<div class="sourceCode" id="cb33"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true"></a><span class="kw">instance</span> <span class="dt">RecursiveMatch</span> (<span class="dt">AExp</span> v) <span class="kw">where</span></span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true"></a><span class="ot">  subMatch ::</span> <span class="dt">MatchSelf</span> (<span class="dt">AExp</span> v)</span>
+<span id="cb33-3"><a href="#cb33-3" aria-hidden="true"></a>  subMatch <span class="ot">=</span> possibly</span>
+<span id="cb33-4"><a href="#cb33-4" aria-hidden="true"></a>    [ aDivArg</span>
+<span id="cb33-5"><a href="#cb33-5" aria-hidden="true"></a>    , aAddArg</span>
+<span id="cb33-6"><a href="#cb33-6" aria-hidden="true"></a>    ]</span>
+<span id="cb33-7"><a href="#cb33-7" aria-hidden="true"></a></span>
+<span id="cb33-8"><a href="#cb33-8" aria-hidden="true"></a><span class="kw">instance</span> <span class="dt">RecursiveMatch</span> (<span class="dt">BExp</span> v) <span class="kw">where</span></span>
+<span id="cb33-9"><a href="#cb33-9" aria-hidden="true"></a><span class="ot">  subMatch ::</span> <span class="dt">MatchSelf</span> (<span class="dt">BExp</span> v)</span>
+<span id="cb33-10"><a href="#cb33-10" aria-hidden="true"></a>  subMatch <span class="ot">=</span> possibly</span>
+<span id="cb33-11"><a href="#cb33-11" aria-hidden="true"></a>    [ bNegArg</span>
+<span id="cb33-12"><a href="#cb33-12" aria-hidden="true"></a>    , bAndArg</span>
+<span id="cb33-13"><a href="#cb33-13" aria-hidden="true"></a>    ]</span>
+<span id="cb33-14"><a href="#cb33-14" aria-hidden="true"></a></span>
+<span id="cb33-15"><a href="#cb33-15" aria-hidden="true"></a><span class="kw">instance</span> <span class="dt">RecursiveMatch</span> (<span class="dt">Stmt</span> v) <span class="kw">where</span></span>
+<span id="cb33-16"><a href="#cb33-16" aria-hidden="true"></a><span class="ot">  subMatch ::</span> <span class="dt">MatchSelf</span> (<span class="dt">Stmt</span> v)</span>
+<span id="cb33-17"><a href="#cb33-17" aria-hidden="true"></a>  subMatch <span class="ot">=</span> possibly</span>
+<span id="cb33-18"><a href="#cb33-18" aria-hidden="true"></a>    [ sBlock <span class="op">.</span> block</span>
+<span id="cb33-19"><a href="#cb33-19" aria-hidden="true"></a>    , sSeqFirst</span>
+<span id="cb33-20"><a href="#cb33-20" aria-hidden="true"></a>    ]</span></code></pre></div>
+<p>Now we can combine simple patterns to create complex patterns. For example:</p>
+<div class="sourceCode" id="cb34"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true"></a><span class="ot">aExpAVar ::</span> <span class="dt">MatchInto'</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb34-2"><a href="#cb34-2" aria-hidden="true"></a>aExpAVar <span class="ot">=</span> recursiveMatch <span class="op">.</span> aVar</span></code></pre></div>
+<p>This pattern <code>aExpAVar</code> will match to all variables inside an <code>AExp</code>, no matter how deep it is in the structure.</p>
+<p>Similarly, we can find all <code>AExp</code> inside a <code>BExp</code> by <code>bExpAExp</code>:</p>
+<div class="sourceCode" id="cb35"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true"></a><span class="ot">bExpAExp ::</span> <span class="dt">MatchInto'</span> (<span class="dt">BExp</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb35-2"><a href="#cb35-2" aria-hidden="true"></a>bExpAExp <span class="ot">=</span> recursiveMatch <span class="op">.</span> bLeArg</span></code></pre></div>
+<p>For more complex patterns, we may need to mix combinators and paths:</p>
+<div class="sourceCode" id="cb36"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true"></a><span class="ot">stmtBExp ::</span> <span class="dt">MatchInto'</span> (<span class="dt">Stmt</span> v) (<span class="dt">BExp</span> v)</span>
+<span id="cb36-2"><a href="#cb36-2" aria-hidden="true"></a>stmtBExp <span class="ot">=</span> recursiveMatch <span class="op">.</span> possibly</span>
+<span id="cb36-3"><a href="#cb36-3" aria-hidden="true"></a>  [ sIteCond</span>
+<span id="cb36-4"><a href="#cb36-4" aria-hidden="true"></a>  ] <span class="op">.</span> recursiveMatch</span></code></pre></div>
+<p>In the implementation of <code>stmtAExp</code>, since both <code>Stmt</code> and <code>AExp</code> can recursively match substructures with the same type, we add <code>recursiveMatch</code> to both ends to thoroughly explore the tree.</p>
+<p>The <code>recursiveMatch</code> on the first line of the definition matches first. It uses the <code>Stmt</code> instance to recursively find all <code>Stmt</code> in a <code>Stmt</code>. And the middle pattern will lead us from a <code>Stmt</code> to a <code>BExp</code>. Although it’s unnecessary to use <code>possibly</code> here, we use a list to remind us to add more cases when the definition is expanded, because this pattern matching path is more likely to be subject to change. Finally, the <code>recursiveMatch</code> on the last line of the definition will find all <code>BExp</code> inside a <code>BExp</code>. In conclusion, <code>stmtBExp</code> will return all <code>BExp</code> inside a <code>Stmt</code>.</p>
+<p>Similarly, we have <code>stmtAExp</code> to pattern match from a <code>Stmt</code> to all <code>AExp</code> inside it.</p>
+<div class="sourceCode" id="cb37"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true"></a><span class="ot">stmtAExp ::</span> <span class="dt">MatchInto'</span> (<span class="dt">Stmt</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb37-2"><a href="#cb37-2" aria-hidden="true"></a>stmtAExp <span class="ot">=</span> recursiveMatch <span class="op">.</span> possibly</span>
+<span id="cb37-3"><a href="#cb37-3" aria-hidden="true"></a>  [ sAssignArg</span>
+<span id="cb37-4"><a href="#cb37-4" aria-hidden="true"></a>  , stmtBExp <span class="op">.</span> bExpAExp</span>
+<span id="cb37-5"><a href="#cb37-5" aria-hidden="true"></a>  ] <span class="op">.</span> recursiveMatch</span></code></pre></div>
+<p>And recall the example in the introduction, where we want to get from a <code>Stmt</code> to all the variables inside it. Well, we can implement that now with:</p>
+<div class="sourceCode" id="cb38"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true"></a><span class="ot">stmtAVar ::</span> <span class="dt">MatchInto'</span> (<span class="dt">Stmt</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb38-2"><a href="#cb38-2" aria-hidden="true"></a>stmtAVar <span class="ot">=</span> stmtAExp <span class="op">.</span> aVar</span></code></pre></div>
+<p>That is, we match a <code>Stmt</code> to find all <code>AExp</code>, and then match them to find all <code>AVar</code>.</p>
+<p>Interestingly, this is not the only way to match from <code>AExp</code> to <code>AVar</code>. We can also write:</p>
+<div class="sourceCode" id="cb39"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true"></a><span class="ot">stmtAVar' ::</span> <span class="dt">MatchInto'</span> (<span class="dt">Stmt</span> v) (<span class="dt">AExp</span> v)</span>
+<span id="cb39-2"><a href="#cb39-2" aria-hidden="true"></a>stmtAVar' <span class="ot">=</span> stmtAExp <span class="op">.</span> aExpAVar</span></code></pre></div>
+<p>That is, we match from a <code>Stmt</code> to <code>AExp</code>, and then go from <code>AExp</code> to all <code>AVar</code>. The difference is that, inside an <code>AExp</code>, <code>stmtAVar</code> will give up if it sees the top level constructor is not <code>AVar</code>, because it is using the <code>aVar</code> pattern, while <code>stmtAVar'</code> will keep searching into substructures.</p>
+<p>We are not leaving out any possible matches if we use the first approach, since <code>stmtAExp</code> will look into the substructures later. This can be proven by the following reasoning: for any <code>AVar</code>, <code>stmtAExp</code> will guarantee to match <code>AVar</code> as <code>AExp</code>, then the last match must be on the constructor <code>AVar</code>.</p>
+<p>In the case of a mismatch, <code>stmtAExp</code> will once again search into substructures of <code>AExp</code>, without knowing <code>aExpAVar</code> has already failed. So the first implementation is correct and more efficient. This gives us an example of thinking about the search order and optimization when dealing with these patterns. It takes a bit of effort to reason, so you should design your patterns carefully.</p>
+<h3 id="evaluation">Evaluation</h3>
+<p>With these patterns ready at hand, the evaluation process is straightforward.</p>
+<p>Suppose by evaluation, we only need to transform the AST (meaning no states are mutated), then an evaluation rule can be defined as:</p>
+<div class="sourceCode" id="cb40"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">Rule</span> <span class="ot">=</span> <span class="dt">Stmt</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> <span class="dt">Stmt</span></span></code></pre></div>
+<p>This is just half of the type of <code>MatchInto</code>. The reason is that we define a pattern matching to be a thing that asks what to do when a pattern matching succeeds, and it will tell you want will happen as a result. Well, an evaluation rule will specifies what to do when a pattern matching succeeds, so the only thing left is what will happen.</p>
+<p>The type basically means that if the pattern matching succeeds and the substitution function returns a <code>Just</code> value, we will get a new tree wrapped in <code>Just</code>. Otherwise, we will get a <code>Nothing</code>.</p>
+<p>For example, to evaluate integer addition:</p>
+<div class="sourceCode" id="cb41"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true"></a><span class="ot">ruleIntAdd ::</span> <span class="dt">Rule</span></span>
+<span id="cb41-2"><a href="#cb41-2" aria-hidden="true"></a>ruleIntAdd <span class="ot">=</span> stmtAExp <span class="op">$</span> \e <span class="ot">-&gt;</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb41-3"><a href="#cb41-3" aria-hidden="true"></a>  (<span class="dt">AAdd</span> (<span class="dt">ALit</span> i1) (<span class="dt">ALit</span> i2)) <span class="ot">-&gt;</span> <span class="dt">Just</span> <span class="op">$</span> <span class="dt">ALit</span> (i1 <span class="op">+</span> i2)</span>
+<span id="cb41-4"><a href="#cb41-4" aria-hidden="true"></a>  _                          <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>Of course, you can change the pattern to reflect different evaluation orders. For example, the <code>BAnd</code> can be made into only strict in the first argument, to exhibit a “short circuit” behaviour:</p>
+<div class="sourceCode" id="cb42"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true"></a><span class="ot">ruleBoolAnd ::</span> <span class="dt">Rule</span></span>
+<span id="cb42-2"><a href="#cb42-2" aria-hidden="true"></a>ruleBoolAnd <span class="ot">=</span> stmtBExp <span class="op">.</span> bAnd <span class="op">$</span> \e <span class="ot">-&gt;</span> <span class="kw">case</span> e <span class="kw">of</span></span>
+<span id="cb42-3"><a href="#cb42-3" aria-hidden="true"></a>  <span class="dt">BAnd</span> (<span class="dt">BLit</span> <span class="dt">True</span>)  e' <span class="ot">-&gt;</span> <span class="dt">Just</span> e'</span>
+<span id="cb42-4"><a href="#cb42-4" aria-hidden="true"></a>  <span class="dt">BAnd</span> (<span class="dt">BLit</span> <span class="dt">False</span>) _  <span class="ot">-&gt;</span> <span class="dt">Just</span> <span class="op">$</span> <span class="dt">BLit</span> <span class="dt">False</span></span>
+<span id="cb42-5"><a href="#cb42-5" aria-hidden="true"></a>  _                    <span class="ot">-&gt;</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>Of course, for an imperative language, it’s not enough to evaluate expressions. We need to maintain a state to be passed between statements. We can provide a pattern into the state-decorated expressions and combine it seamlessly with normal patterns. (For those familiar with optics, we obtain a prism by composing a lens with a prism.)</p>
+<p>For a complete example of evaluation rules for IMP, see <a href="https://github.com/crvdgc/imp-interpreter/blob/master/imp-interpreter/src/IMP/Semantics.hs">this page</a>.</p>
+<h2 id="relation-to-prisms">Relation to Prisms</h2>
+<p>A <a href="https://hackage.haskell.org/package/lens-5.0.1/docs/Control-Lens-Prism.html"><code>Prism</code></a> is a kind of optics. To some extent, it can be understood as a way to extract a value from a sum type. This is very close to what we have defined to be a pattern matching process.</p>
+<p>The definition of <code>Prism</code> encoded in the so-called van Laarhoven representation is as follows:</p>
+<div class="sourceCode" id="cb43"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb43-1"><a href="#cb43-1" aria-hidden="true"></a><span class="kw">type</span> <span class="dt">Prism</span> s t a b <span class="ot">=</span> <span class="kw">forall</span> p f<span class="op">.</span> (<span class="dt">Choice</span> p, <span class="dt">Applicative</span> f)</span>
+<span id="cb43-2"><a href="#cb43-2" aria-hidden="true"></a>  <span class="ot">=&gt;</span> p a (f b) <span class="ot">-&gt;</span> p s (f t)</span></code></pre></div>
+<p>As a matter of fact, <code>(-&gt;)</code> is an instance of <code>Choice</code>, and <code>Maybe</code> is an instance of <code>Applicative</code>. If we instantiate <code>p</code> to <code>(-&gt;)</code> and <code>f</code> to <code>Maybe</code>, we get the exact type of <code>MatchInto</code>.</p>
+<p>Therefore, although the type <code>MatchInto</code> is not a prism, it is composable with other prisms. The reason is that a prism must work with every <code>p</code> and <code>f</code> that are instances of <code>Choice</code> and <code>Applicative</code> respectively. Then, a prism can always be instantiated to <code>(-&gt;)</code> and <code>Maybe</code>, so that it can compose with pattern matching functions. For example,</p>
+<div class="sourceCode" id="cb44"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true"></a><span class="ot">_Just        ::</span> <span class="dt">Prism</span> (<span class="dt">Maybe</span> a) (<span class="dt">Maybe</span> b) a b</span>
+<span id="cb44-2"><a href="#cb44-2" aria-hidden="true"></a>_Just <span class="op">.</span><span class="ot"> aLit ::</span> (<span class="dt">AExp</span> v <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (<span class="dt">AExp</span> v))</span>
+<span id="cb44-3"><a href="#cb44-3" aria-hidden="true"></a>             <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (<span class="dt">AExp</span> v) <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (<span class="dt">Maybe</span> (<span class="dt">AExp</span> v))</span></code></pre></div>
+<p>This allows us to apply a pattern matching function within a <code>Maybe</code> value and the pattern matching is only performed in a <code>Just</code> case.</p>
+<p>I will not go into the details of the implementation of prisms. However, I hope the above introduction of pattern matching functions should at least help to build some intuition for prisms and their composition.</p>
+<p>From the this perspective, it should be possible to write prisms for constructors of everyday sum types. In fact, for a class of sum types, some optics packages can use template Haskell to automatically generate prisms that cover all the above pattern matching functions. To do this with the <a href="https://hackage.haskell.org/package/lens-5.0.1">lens package</a>, after introducing the <a href="https://hackage.haskell.org/package/lens-5.0.1/docs/Control-Lens-TH.html">related package</a> into scope, you only need to add the following lines after the type definition.</p>
+<div class="sourceCode" id="cb45"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true"></a>makePrisms '<span class="dt">'AExp</span></span>
+<span id="cb45-2"><a href="#cb45-2" aria-hidden="true"></a>makePrisms '<span class="dt">'BExp</span></span>
+<span id="cb45-3"><a href="#cb45-3" aria-hidden="true"></a>makePrisms '<span class="dt">'Stmt</span></span></code></pre></div>
+<p>For a constructor like <code>ALit</code>, a prism with the name <code>_ALit</code> will be generated. Not only can it perform everything we do with the pattern matching function <code>aLit</code>, it has the full power of a complete prism. The implication is that we can use a lot of the functions from the <code>lens</code> package, to support a wider range of actions with these pattern matching paths.</p>
+<div class="sourceCode" id="cb46"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true"></a><span class="ot">_ALit ::</span> <span class="dt">Prism</span> (<span class="dt">AExp</span> v) (<span class="dt">AExp</span> v) <span class="dt">Int</span> <span class="dt">Int</span></span></code></pre></div>
+<p>We can query if there is a value inside a type with the <code>^?</code> operator.</p>
+<div class="sourceCode" id="cb47"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> (<span class="dt">ALit</span> <span class="dv">5</span>) <span class="op">^?</span> _ALit</span>
+<span id="cb47-2"><a href="#cb47-2" aria-hidden="true"></a><span class="dt">Just</span> <span class="dv">5</span></span>
+<span id="cb47-3"><a href="#cb47-3" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> (<span class="dt">ALit</span> <span class="dv">5</span>) <span class="op">^?</span> _AVar</span>
+<span id="cb47-4"><a href="#cb47-4" aria-hidden="true"></a><span class="dt">Nothing</span></span></code></pre></div>
+<p>We can apply a function to the value pointed by the prism with the function <code>over</code>:</p>
+<div class="sourceCode" id="cb48"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true"></a><span class="op">&gt;&gt;&gt;</span> over (_AAdd <span class="op">.</span> _1 <span class="op">.</span> _ALit) (<span class="op">+</span><span class="dv">1</span>) (<span class="dt">AAdd</span> (<span class="dt">ALit</span> <span class="dv">5</span>) (<span class="dt">AVar</span> <span class="st">&quot;x&quot;</span>))</span>
+<span id="cb48-2"><a href="#cb48-2" aria-hidden="true"></a>(<span class="dt">AAdd</span> (<span class="dt">ALit</span> <span class="dv">6</span>) (<span class="dt">AVar</span> <span class="st">&quot;x&quot;</span>))</span></code></pre></div>
+<p>Here <code>_1</code> will select the first component of the arguments of <code>_AAdd</code>.</p>
+<p>These may seem confusing if you are not familiar with optics. If that’s the case, you can use what we have introduced before as a reference. Because of their additional power, optics packages provide many more functions and operators to interact with them. To use those tools, one need to get used to the specific symbols, but at a user level, it’s not that magical. Basically you need to specific three things:</p>
+<ol type="1">
+<li>How to get to the place? Usually by composition of prisms and other optics.</li>
+<li>What to do after we get there? We can view the value, apply a function to change the value, and do many other things.</li>
+<li>In addition, prisms also allow you to choose how to pack the structure back. In our application, we only allow replacement to the same place, but for different optics, you may be able to keep the structure, fold it with a special typeclass instance, or make a list of all matched values.</li>
+</ol>
+<h2 id="conclusions">Conclusions</h2>
+<p>In this blog post, we introduced a way to perform pattern matchings for AST evaluation. The core of this representation lies in the type definition <code>type MatchInto s t a b = (a -&gt; Maybe b) -&gt; (s -&gt; Maybe t)</code>. We applied this method to the IMP language and introduced some combinators that allow us to write complex patterns.</p>
+<p>We then explained the relation between our method and prisms, namely, prisms are more general structures that come with many tools. Our method can be replaced by prisms. And the original definition composes with prisms to some extent.</p>
+<p>A complete IMP interpreter that utilises the aforementioned method of pattern-matching-based tree evaluation can be found at <a href="https://github.com/crvdgc/imp-interpreter">this repository</a>, along with some descriptions and tests.</p>
+
+        </div>
+        </div>
+        <div id="footer">
+          <div class="inside">
+            <p>
+			网页使用 <a href="http://jaspervdj.be/hakyll">Hakyll</a> 生成<br />
+			字体：中文 - 思源宋体, Serif - <a href="https://github.com/SorkinType/Merriweather">Merriweather</a>, Monospace - <a href="https://github.com/tonsky/FiraCode">FiraCode</a><br />
+			主题改编自 The Professional， 设计者 <a href="http://twitter.com/katychuang">Dr. Kat</a><br />
+            </p>
+            <p class="copyright">
+                所有内容均以 <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/">Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License</a> 授权。非商用转载无需征得同意，注明出处即可。
+            </p>
+          </div>
+        </div>
+    </body>
+</html>
