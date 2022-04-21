@@ -64,7 +64,7 @@ main = do
 
 --------------------------------------------------------------------------------
 postCtx :: Context String
-postCtx = dateField "date" "%B %e, %Y" `mappend` siteCtx
+postCtx = dateField "date" "%Y-%m-%d" `mappend` siteCtx
 
 siteCtx :: Context String
 siteCtx = activeClassField `mappend` defaultContext
