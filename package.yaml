@@ -1,0 +1,8 @@
+name: blog
+
+dependencies:
+    - base
+    - hakyll
+
+executable:
+    main: site.hs
