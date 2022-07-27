@@ -4,8 +4,6 @@
 import qualified GHC.IO.Encoding as E
 import Hakyll
 
-import Debug.Trace (traceShowId)
-
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
@@ -62,7 +60,6 @@ main = do
         makeItem ""
           >>= loadAndApplyTemplate "templates/404.html" notFoundCtx
           >>= loadAndApplyTemplate "templates/default.html" notFoundCtx
-          >>= relativizeUrls
     match "templates/*" $ compile templateCompiler
 
     -- feed
